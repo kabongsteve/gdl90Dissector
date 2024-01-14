@@ -3,16 +3,17 @@
 gdl90_proto = Proto("gdl90","GDL 90")
 
 local function dissectMessageID(buffer,pinfo,subtree,desc)
-  subtree:add(buffer(1,1),"Message ID: " .. buffer(1,1):uint() .. " (" .. desc .. ")")
-  pinfo.cols.info = desc
+  local msgtree = subtree:add(gdl90_proto,buffer(1,1),"Message ID: " .. buffer(1,1):uint() .. " (" .. desc .. ")")
+  pinfo.cols.info = tostring(pinfo.cols.info) .. desc .. ", "
+  return msgtree
 end
 
 local function bitValue(byteValue,pos)
  return bit32.rshift(bit32.band(bit32.lshift(1,pos),byteValue),pos)
 end
 
-local function dissectHeartbeat(buffer,pinfo,subtree)
-  dissectMessageID(buffer,pinfo,subtree,"Heartbeat")
+local function dissectHeartbeat(buffer,pinfo,partree)
+  local subtree = dissectMessageID(buffer,pinfo,partree,"Heartbeat")
 
   local statusByte1Tree = subtree:add(gdl90_proto,buffer(2,1),"Status Byte 1")
   local statusByteValue = buffer(2,1):uint()
@@ -47,10 +48,11 @@ local function dissectHeartbeat(buffer,pinfo,subtree)
   local basicAndLongReceptionsValue = bit32.bor(bit32.band(buffer(6,1):uint(),3),buffer(7,1):uint())
   msgCountsTree:add(buffer(6,1),"Uplink Receptions: " .. uplinkReceptionsValue)
   msgCountsTree:add(buffer(6,2),"Basic and Long Receptions: " .. basicAndLongReceptionsValue)
+  return 7
 end
 
-local function dissectInitialization(buffer,pinfo,subtree)
-  dissectMessageID(buffer,pinfo,subtree,"Initialization")
+local function dissectInitialization(buffer,pinfo,partree)
+  local subtree = dissectMessageID(buffer,pinfo,partree,"Initialization")
 
   local configByte1Tree = subtree:add(gdl90_proto,buffer(2,1),"Configuration Byte 1")
   local configByteValue = buffer(2,1):uint()
@@ -74,22 +76,26 @@ local function dissectInitialization(buffer,pinfo,subtree)
   configByte2Tree:add(buffer(3,1),"CSA Audio Disable: " .. bitValue(configByte2Value,1))
   configByte2Tree:add(buffer(3,1),"CSA Disable      : " .. bitValue(configByte2Value,0))
 
+  return 3
 end
 
-local function dissectUplinkData(buffer,pinfo,subtree)
-  dissectMessageID(buffer,pinfo,subtree,"Uplink Data")
+local function dissectUplinkData(buffer,pinfo,partree)
+  local subtree = dissectMessageID(buffer,pinfo,subtree,"Uplink Data")
 
   subtree:add(buffer(2,3),"Time Of Reception: " .. buffer(2,3):uint())
   subtree:add(buffer(5,8),"UAT Header: " .. buffer(5,8))
 
   local appDataLen = buffer:reported_length_remaining() - 14
   subtree:add(buffer(11,appDataLen),"Application Data: " .. buffer(11,appDataLen))
+  
+  return 436
 end
 
-local function dissectHeightAboveTerrain(buffer,pinfo,subtree)
-  dissectMessageID(buffer,pinfo,subtree,"Height Above Terrain")
+local function dissectHeightAboveTerrain(buffer,pinfo,partree)
+  local subtree = dissectMessageID(buffer,pinfo,partree,"Height Above Terrain")
 
   subtree:add(buffer(2,2),"Height Above Terrain: " .. buffer(2,2):int() .. " ft.")
+  return 5
 end
 
 -- Convert to degrees
@@ -138,20 +144,28 @@ local function dissectTrafficReportFields(buffer,pinfo,subtree)
   subtree:add(buffer(12,1), "NIC: " .. bit32.rshift(buffer(12,1):uint(),4))
   subtree:add(buffer(12,1), "NACp: " .. bit32.extract(buffer(12,1):uint(),0,4))
 
-  subtree:add(buffer(13,2), "Horizontal Velocity: " .. bit32.rshift(buffer(13,2):uint(),4) .. " knots")
+  local horizontalVelocity = bit32.rshift(buffer(13,2):uint(),4)
+  if horizontalVelocity == 0xFFF then
+	subtree:add(buffer(13,2), "Horizontal Velocity: N/A knots")
+  else
+	subtree:add(buffer(13,2), "Horizontal Velocity: " .. horizontalVelocity .. " knots")
+  end
 
   -- Vertical velocity signed in units of 64 fpm
   -- 0x000 is 0
   -- 0x001 is +64
   -- 0xFFF is -64
   local verticalVelocity = bit32.extract(buffer(14,2):uint(),0,12)
-  if (bit32.band(verticalVelocity, 0x800) == 0x800) then
-    -- Negative value, convert
-    verticalVelocity = bit32.band(verticalVelocity, 0x000007FF)-0x800
+  if verticalVelocity == 0x800 then
+      subtree:add(buffer(14,2), "Vertical Velocity: N/A fpm")
+  else
+    if (bit32.band(verticalVelocity, 0x800) == 0x800) then
+	  -- Negative value, convert
+	  verticalVelocity = bit32.band(verticalVelocity, 0x000007FF)-0x800
+    end
+    verticalVelocity = verticalVelocity * 64
+    subtree:add(buffer(14,2), "Vertical Velocity: " .. verticalVelocity .. " fpm")
   end
-  verticalVelocity = verticalVelocity * 64
-  subtree:add(buffer(14,2), "Vertical Velocity: " .. verticalVelocity .. " fpm")
-
   -- Track/Heading 8-bit angular weighted binary, resolution 360/256 degrees
   -- 0=North, 128=South
   local tt = buffer(16,1):uint() * 360 / 256;
@@ -164,16 +178,17 @@ local function dissectTrafficReportFields(buffer,pinfo,subtree)
   subtree:add(buffer(26,1), "Emergency/Priority Code: " .. bit32.rshift(buffer(26,1):uint(),4))
   subtree:add(buffer(26,1), "Spare: " .. bit32.extract(buffer(26,1):uint(),0,4))
 
+  return 28
 end
 
-local function dissectOwnshipReport(buffer,pinfo,subtree)
-  dissectMessageID(buffer,pinfo,subtree,"Ownship Report")
+local function dissectOwnshipReport(buffer,pinfo,partree)
+  local subtree = dissectMessageID(buffer,pinfo,partree,"Ownship Report")
 
-  dissectTrafficReportFields(buffer(2,27),pinfo,subtree);
+  return dissectTrafficReportFields(buffer(2,27),pinfo,subtree);
 end
 
-local function dissectOwnshipGeometricAltitude(buffer,pinfo,subtree)
-  dissectMessageID(buffer,pinfo,subtree,"Ownship Geometric Altitude")
+local function dissectOwnshipGeometricAltitude(buffer,pinfo,partree)
+  local subtree = dissectMessageID(buffer,pinfo,partree,"Ownship Geometric Altitude")
 
   subtree:add(buffer(2,2),"Ownship Geometric Altitude: " .. buffer(2,2):int() * 5 .. " ft.")
 
@@ -182,24 +197,46 @@ local function dissectOwnshipGeometricAltitude(buffer,pinfo,subtree)
 
   local verticalFigureOfMerritValue = bit32.band(32767, buffer(4,2):uint())
   verticalMetricsTree:add(buffer(4,2),"Vertical Figure of Merit: " .. verticalFigureOfMerritValue)
+
+  return 5
 end
 
-local function dissectTrafficReport(buffer,pinfo,subtree)
-  dissectMessageID(buffer,pinfo,subtree,"Traffic Report")
+local function dissectTrafficReport(buffer,pinfo,partree)
+  local subtree = dissectMessageID(buffer,pinfo,partree,"Traffic Report")
 
-  dissectTrafficReportFields(buffer(2,27),pinfo,subtree);
+  return dissectTrafficReportFields(buffer(2,27),pinfo,subtree);
 end
 
 local function dissectBasicReport(buffer,pinfo,subtree)
   dissectMessageID(buffer,pinfo,subtree,"Basic Report")
+  return 22
 end
 
 local function dissectLongReport(buffer,pinfo,subtree)
   dissectMessageID(buffer,pinfo,subtree,"Long Report")
+  return 38
 end
 
-local function dissectUavionixStatic(buffer,pinfo,subtree)
-  dissectMessageID(buffer,pinfo,subtree,"uAvionix Static Configuration")
+
+local function dissectUavionixId(buffer,pinfo,partree)
+  local subtree = dissectMessageID(buffer,pinfo,partree,"uAvionix Id Message")
+
+  local subtype = buffer(2,1):uint()
+  subtree:add(buffer(2,1), "Subtype: " .. subtype)
+  subtree:add(buffer(3,1), "Version: " .. buffer(3,1):uint())
+
+
+  subtree:add(buffer(4,3), "Device Serial Number (hex): " .. buffer(5,8):bytes():tohex())
+  subtree:add(buffer(12,8), "Device Name: " .. buffer(12,8):string())
+  subtree:add(buffer(20,16), "Device Long Name: " .. buffer(20,16):string())
+
+  subtree:add(buffer(36,4), "Capabilities (hex): " .. buffer(36,4):bytes():tohex())
+  
+  return 39
+end
+
+local function dissectUavionixStatic(buffer,pinfo,partree)
+  local subtree = dissectMessageID(buffer,pinfo,partree,"uAvionix Static Configuration")
 
   subtree:add(buffer(2,1), "Signature: " .. buffer(2,1):uint())
   local subtype = buffer(3,1):uint()
@@ -221,6 +258,8 @@ local function dissectUavionixStatic(buffer,pinfo,subtree)
     subtree:add(buffer(19,1), "Antenna Offset Lat: " .. antOffsetLat .. " (0x" .. string.format("%x", antOffsetLat) .. ")")
     local antOffsetLon = bit32.extract(buffer(19,1):uint(),0,5)
     subtree:add(buffer(19,1), "Antenna Offset Lon: " .. antOffsetLon .. " (0x" .. string.format("%x", antOffsetLon) .. ")")
+	
+	return 20
   elseif (subtype == 2) then
     -- Setup packet
     local sil = buffer(5,1):uint()
@@ -241,6 +280,7 @@ local function dissectUavionixStatic(buffer,pinfo,subtree)
     else
       subtree:add(buffer(7,2), "Sniffer Threshold: " .. threshold)
     end
+	return 8
   end
 end
 
@@ -293,34 +333,33 @@ local crcTable = {0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5,
               0x2e93, 0x3eb2, 0x0ed1, 0x1ef0}
 
 -- Calculate CRC16
-local function calculateCrc16(buffer)
-  local pktlen = buffer:reported_length_remaining()
+-- Calculate CRC16
+local function calculateCrc16(buffer,pktlen)
   local crc = 0x0000;
   local crcTemp1, crcTemp2, crcTemp3
   -- Don't calculate CRC over flag bytes or CRC
-  for i=1,pktlen-4 do
-    crcTemp1 = crcTable[bit32.band(bit32.rshift(crc, 8),0xFF)+1]
-    crcTemp2 = bit32.lshift(bit32.band(crc,0xFF), 8)
+  for i=1,pktlen do
+    crcTemp1 = crcTable[bit.band(bit.rshift(crc, 8),0xFF)+1]
+    crcTemp2 = bit.lshift(bit.band(crc,0xFF), 8)
     crcTemp3 = buffer(i,1):uint()
-    crc = bit32.bxor(crcTemp1, crcTemp2, crcTemp3)
+    crc = bit.bxor(crcTemp1, crcTemp2, crcTemp3)
   end
   return crc;
 end
 
 local function swap16(value)
-  return bit32.band(bit32.rshift(value, 8) + bit32.lshift(value,8), 0xFFFF)
+  return bit.band(bit.rshift(value, 8) + bit.lshift(value,8), 0xFFFF)
 end
 
 -- Return true if valid
-local function validateFcs(buffer,pinfo,subtree)
-  local pktlen = buffer:reported_length_remaining()
-  local crcCalculated = calculateCrc16(buffer)
-  local crcReceived = swap16(buffer(pktlen-3,2):uint())
+local function validateFcs(buffer,pinfo,subtree,pktlen)
+  local crcCalculated = calculateCrc16(buffer,pktlen)
+  local crcReceived = swap16(buffer(pktlen+1,2):uint())
   if crcCalculated == crcReceived then
-    subtree:add(buffer(pktlen-3,2),"Frame Check Sequence: 0x" .. string.format("%x",crcReceived))
+    subtree:add(buffer(pktlen+1,2),"Frame Check Sequence: 0x" .. string.format("%x",crcReceived))
     return true
   else
-    local fcs = subtree:add(buffer(pktlen-3,2),"Frame Check Sequence: INVALID " .. string.format("recv=0x%x,calc=0x%x",crcReceived,crcCalculated))
+    local fcs = subtree:add(buffer(pktlen+1,2),"Frame Check Sequence: INVALID " .. string.format("recv=0x%x,calc=0x%x",crcReceived,crcCalculated))
     fcs:add_expert_info(PI_CHECKSUM, PI_ERROR, "Invalid FCS")
     subtree:add_expert_info(PI_CHECKSUM, PI_ERROR, "Invalid FCS")
     return false
@@ -361,12 +400,15 @@ msgDissectFunctions[10] = dissectOwnshipReport
 msgDissectFunctions[11] = dissectOwnshipGeometricAltitude
 msgDissectFunctions[20] = dissectTrafficReport
 msgDissectFunctions[30] = dissectBasicReport
+msgDissectFunctions[101] = dissectUavionixId
 msgDissectFunctions[117] = dissectUavionixStatic
+
 
 -- create a function to dissect it
 function gdl90_proto.dissector(buffer,pinfo,tree)
   pinfo.cols.protocol = "GDL90"
-
+  pinfo.cols.info = ""
+  
   local decodedBuffer = unBytestuff(buffer)
   local decodedLen = decodedBuffer:reported_length_remaining()
 
@@ -377,24 +419,27 @@ function gdl90_proto.dissector(buffer,pinfo,tree)
   subtree:add(decodedBuffer(0,decodedLen),"Unstuffed Len: " .. decodedLen)
   subtree:add(decodedBuffer(0,1),string.format("Flag Byte: 0x%02x", decodedBuffer(0,1):uint()))
   
-  if (msgDissectFunctions[decodedBuffer(1,1):uint()] == nil) then
-    dissectUnknown(decodedBuffer,pinfo,subtree)
-  else
-    msgDissectFunctions[decodedBuffer(1,1):uint()](decodedBuffer,pinfo,subtree)
-  end
+  local workbuf = decodedBuffer:range(0, -1)
+  local nextbuf = 0
+  
+  while nextbuf < decodedLen do
+    if (msgDissectFunctions[decodedBuffer(1,1):uint()] == nil) then
+  	  dissectUnknown(decodedBuffer,pinfo,subtree)
+	  break
+    else
+      workbuf = decodedBuffer:range(nextbuf, -1)
+      local msglen = msgDissectFunctions[workbuf(1,1):uint()](workbuf,pinfo,subtree)
 
-  local validFcs = validateFcs(decodedBuffer,pinfo,subtree)
-  subtree:add(decodedBuffer(decodedLen-1,1),string.format("Flag Byte: 0x%02x", decodedBuffer(decodedLen-1,1):uint()))
+      nextbuf = nextbuf + msglen + 4
 
-  if pktlen ~= decodedLen then
-    pinfo.cols.info = tostring(pinfo.cols.info) .. ", Stuffed"
+      local validFcs = validateFcs(workbuf,pinfo,subtree,msglen)
+      subtree:add(workbuf(msglen+3,1),string.format("Flag Byte: 0x%02x", workbuf(msglen+3,1):uint()))
+	end
   end
-  if validFcs == false then
-    pinfo.cols.info = tostring(pinfo.cols.info) .. ", Invalid FCS"
-  end
-  pinfo.cols.info = tostring(pinfo.cols.info) .. ", Len=" .. pktlen
+  pinfo.cols.info = tostring(pinfo.cols.info) .. "Len=" .. pktlen
 end
 -- load the udp.port table
 udp_table = DissectorTable.get("udp.port")
 -- register our protocol to handle udp port 4000
 udp_table:add(4000,gdl90_proto)
+udp_table:add(43211,gdl90_proto)
